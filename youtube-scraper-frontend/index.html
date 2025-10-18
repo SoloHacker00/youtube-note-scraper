@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Auto-Note Taker</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { position: relative; background: white; padding: 40px 50px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.08); text-align: center; width: 90%; max-width: 500px; }
+        h1 { color: #1c1e21; margin-bottom: 25px; }
+        input, select, button { width: 100%; padding: 14px; margin-top: 15px; border-radius: 6px; border: 1px solid #dddfe2; box-sizing: border-box; font-size: 16px; }
+        button { width: 100%; padding: 14px; margin-top: 20px; border-radius: 6px; border: none; background-color: #1877f2; color: white; cursor: pointer; font-size: 18px; font-weight: bold; }
+        button:hover { background-color: #166fe5; }
+        #status { margin-top: 25px; font-weight: bold; font-size: 16px; transition: color 0.3s; }
+        .settings-icon { position: absolute; top: 15px; right: 15px; font-size: 24px; cursor: pointer; user-select: none; opacity: 0.6; }
+        .settings-icon:hover { opacity: 1; }
+        .settings-panel { display: none; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; text-align: left; }
+        .settings-panel h3 { margin-top: 0; color: #606770; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="settings-icon" onclick="toggleSettings()">⚙</div>
+        <h1>YouTube Auto-Note Taker</h1>
+        <input type="url" id="link-input" placeholder="Paste YouTube Video URL here...">
+        
+        <div class="settings-panel" id="settings-panel">
+            <h3>Advanced Settings (Optional)</h3>
+            <select id="api-platform">
+                <option value="groq">Groq (Default)</option>
+                <option value="google_gemini">Google Gemini</option>
+                <option value="openai">OpenAI</option>
+            </select>
+            <input type="password" id="api-key" placeholder="Enter your own API key (optional)">
+            <input type="text" id="api-model" placeholder="Enter model name (optional)">
+        </div>
+
+        <button onclick="submitLink()">Generate Notes</button>
+        <div id="status"></div>
+    </div>
+
+    <script>
+        // IMPORTANT: Replace this with your new n8n Cloud Production Webhook URL
+        const n8nWebhookUrl = 'YOUR_N8N_CLOUD_WEBHOOK_URL_HERE';
+
+        function toggleSettings() {
+            const panel = document.getElementById('settings-panel');
+            panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+        }
+
+        function submitLink() {
+            const statusDiv = document.getElementById('status');
+            const url = document.getElementById('link-input').value;
+
+            if (!url) {
+                statusDiv.textContent = 'Please paste a URL.';
+                statusDiv.style.color = '#fa383e';
+                return;
+            }
+
+            statusDiv.textContent = 'Sending to workflow... This may take several minutes.';
+            statusDiv.style.color = '#f5a623';
+
+            // Collect data from optional settings
+            const apiKey = document.getElementById('api-key').value;
+            const apiPlatform = document.getElementById('api-platform').value;
+            const apiModel = document.getElementById('api-model').value;
+
+            const payload = {
+                url: url,
+                custom_api: {}
+            };
+
+            // Only send custom_api object if a key is provided
+            if (apiKey) {
+                payload.custom_api = {
+                    platform: apiPlatform,
+                    key: apiKey,
+                    model: apiModel // Can be empty, the python script will use a default
+                };
+            }
+
+            fetch(n8nWebhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(response => {
+                if (response.ok) {
+                    statusDiv.textContent = '✅ Success! Your notes will be ready in Google Drive shortly.';
+                    statusDiv.style.color = '#2ab27b';
+                } else { throw new Error('Webhook returned an error. Please check the n8n workflow.'); }
+            })
+            .catch(error => {
+                statusDiv.textContent = '❌ Error sending request. The service may be offline.';
+                statusDiv.style.color = '#fa383e';
+                console.error('Error:', error);
+            });
+        }
+    </script>
+</body>
+</html>

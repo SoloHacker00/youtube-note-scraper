@@ -1,0 +1,5 @@
+requests
+yt-dlp
+webvtt-py
+fastapi
+uvicorn
