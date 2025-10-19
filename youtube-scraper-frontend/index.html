@@ -3,98 +3,126 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube Auto-Note Taker</title>
+    <title>YouTube Real-Time Note Taker</title>
+    <!-- Libraries for Markdown -> PDF conversion -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .container { position: relative; background: white; padding: 40px 50px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.08); text-align: center; width: 90%; max-width: 500px; }
-        h1 { color: #1c1e21; margin-bottom: 25px; }
-        input, select, button { width: 100%; padding: 14px; margin-top: 15px; border-radius: 6px; border: 1px solid #dddfe2; box-sizing: border-box; font-size: 16px; }
-        button { width: 100%; padding: 14px; margin-top: 20px; border-radius: 6px; border: none; background-color: #1877f2; color: white; cursor: pointer; font-size: 18px; font-weight: bold; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+        .container { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.08); width: 100%; max-width: 800px; }
+        h1 { color: #1c1e21; text-align: center; }
+        input, button { width: 100%; padding: 14px; margin-top: 15px; border-radius: 6px; border: 1px solid #dddfe2; box-sizing: border-box; font-size: 16px; }
+        button { border: none; background-color: #1877f2; color: white; cursor: pointer; font-size: 18px; font-weight: bold; transition: background-color 0.3s; }
         button:hover { background-color: #166fe5; }
-        #status { margin-top: 25px; font-weight: bold; font-size: 16px; transition: color 0.3s; }
-        .settings-icon { position: absolute; top: 15px; right: 15px; font-size: 24px; cursor: pointer; user-select: none; opacity: 0.6; }
-        .settings-icon:hover { opacity: 1; }
-        .settings-panel { display: none; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; text-align: left; }
-        .settings-panel h3 { margin-top: 0; color: #606770; font-size: 14px; }
+        button:disabled { background-color: #a0bdf5; cursor: not-allowed; }
+        #notes-output { margin-top: 25px; padding: 20px; border: 1px solid #eee; border-radius: 8px; background-color: #f7f7f7; max-height: 400px; overflow-y: auto; text-align: left; white-space: pre-wrap; line-height: 1.6; }
+        #status { text-align: center; margin-top: 15px; font-weight: bold; }
+        #pdf-btn { display: none; background-color: #2ab27b; } /* Hidden by default */
+        #pdf-btn:hover { background-color: #218c62; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="settings-icon" onclick="toggleSettings()">⚙</div>
-        <h1>YouTube Auto-Note Taker</h1>
+        <h1>YouTube Real-Time Note Taker</h1>
         <input type="url" id="link-input" placeholder="Paste YouTube Video URL here...">
-        
-        <div class="settings-panel" id="settings-panel">
-            <h3>Advanced Settings (Optional)</h3>
-            <select id="api-platform">
-                <option value="groq">Groq (Default)</option>
-                <option value="google_gemini">Google Gemini</option>
-                <option value="openai">OpenAI</option>
-            </select>
-            <input type="password" id="api-key" placeholder="Enter your own API key (optional)">
-            <input type="text" id="api-model" placeholder="Enter model name (optional)">
-        </div>
-
-        <button onclick="submitLink()">Generate Notes</button>
+        <button id="generate-btn" onclick="submitLink()">Generate Notes</button>
         <div id="status"></div>
+        <div id="notes-output" style="display:none;"></div>
+        <button id="pdf-btn" onclick="downloadPDF()">Download as PDF</button>
     </div>
 
     <script>
-        // IMPORTANT: Replace this with your new n8n Cloud Production Webhook URL
         const n8nWebhookUrl = 'YOUR_N8N_CLOUD_WEBHOOK_URL_HERE';
+        let fullMarkdownContent = "";
+        let videoTitle = "notes";
 
-        function toggleSettings() {
-            const panel = document.getElementById('settings-panel');
-            panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+        function toggleButtons(isProcessing) {
+            document.getElementById('generate-btn').disabled = isProcessing;
+            document.getElementById('generate-btn').textContent = isProcessing ? 'Processing...' : 'Generate Notes';
+            document.getElementById('pdf-btn').style.display = 'none';
         }
 
-        function submitLink() {
-            const statusDiv = document.getElementById('status');
+        async function submitLink() {
             const url = document.getElementById('link-input').value;
+            const statusDiv = document.getElementById('status');
+            const notesOutput = document.getElementById('notes-output');
 
-            if (!url) {
-                statusDiv.textContent = 'Please paste a URL.';
-                statusDiv.style.color = '#fa383e';
-                return;
+            if (!url) { /* ... error handling ... */ return; }
+
+            toggleButtons(true);
+            statusDiv.textContent = 'Connecting to workflow...';
+            notesOutput.style.display = 'block';
+            notesOutput.innerHTML = '';
+            fullMarkdownContent = "";
+
+            try {
+                const response = await fetch(n8nWebhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: url })
+                });
+
+                if (!response.ok) { throw new Error(Server error: ${response.status}); }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        statusDiv.textContent = '✅ Note generation complete!';
+                        document.getElementById('pdf-btn').style.display = 'block';
+                        break;
+                    }
+                    
+                    const textChunk = decoder.decode(value);
+                    const lines = textChunk.split('\n');
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const jsonData = JSON.parse(line.substring(6));
+                            if (jsonData.title) {
+                                videoTitle = jsonData.title;
+                                statusDiv.textContent = Generating notes for: ${videoTitle};
+                            }
+                            if (jsonData.chunk) {
+                                fullMarkdownContent += jsonData.chunk;
+                                notesOutput.innerHTML = marked.parse(fullMarkdownContent);
+                                notesOutput.scrollTop = notesOutput.scrollHeight; // Auto-scroll
+                            }
+                            if (jsonData.error) {
+                                throw new Error(jsonData.error);
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                statusDiv.textContent = ❌ An error occurred: ${error.message};
+            } finally {
+                toggleButtons(false);
             }
+        }
+        
+        function downloadPDF() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            const notesContainer = document.createElement('div');
+            notesContainer.innerHTML = marked.parse(fullMarkdownContent);
+            
+            // For better PDF rendering, we render the HTML off-screen
+            notesContainer.style.width = '180mm'; // A4 width minus margins
+            notesContainer.style.padding = '10mm';
+            document.body.appendChild(notesContainer);
 
-            statusDiv.textContent = 'Sending to workflow... This may take several minutes.';
-            statusDiv.style.color = '#f5a623';
-
-            // Collect data from optional settings
-            const apiKey = document.getElementById('api-key').value;
-            const apiPlatform = document.getElementById('api-platform').value;
-            const apiModel = document.getElementById('api-model').value;
-
-            const payload = {
-                url: url,
-                custom_api: {}
-            };
-
-            // Only send custom_api object if a key is provided
-            if (apiKey) {
-                payload.custom_api = {
-                    platform: apiPlatform,
-                    key: apiKey,
-                    model: apiModel // Can be empty, the python script will use a default
-                };
-            }
-
-            fetch(n8nWebhookUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            })
-            .then(response => {
-                if (response.ok) {
-                    statusDiv.textContent = '✅ Success! Your notes will be ready in Google Drive shortly.';
-                    statusDiv.style.color = '#2ab27b';
-                } else { throw new Error('Webhook returned an error. Please check the n8n workflow.'); }
-            })
-            .catch(error => {
-                statusDiv.textContent = '❌ Error sending request. The service may be offline.';
-                statusDiv.style.color = '#fa383e';
-                console.error('Error:', error);
+            html2canvas(notesContainer).then(canvas => {
+                const imgData = canvas.toDataURL('image/png');
+                const imgProps = doc.getImageProperties(imgData);
+                const pdfWidth = doc.internal.pageSize.getWidth();
+                const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+                doc.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+                doc.save(${videoTitle}.pdf);
+                document.body.removeChild(notesContainer);
             });
         }
     </script>
