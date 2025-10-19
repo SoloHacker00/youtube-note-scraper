@@ -33,7 +33,9 @@
     </div>
 
     <script>
-        const n8nWebhookUrl = 'YOUR_N8N_CLOUD_WEBHOOK_URL_HERE';
+        // THIS IS THE CORRECT, CONNECTED URL
+        const n8nWebhookUrl = 'https://solohacker.app.n8n.cloud/webhook-test/43d38816-3109-40a5-9f0c-b3747fc263a5';
+        
         let fullMarkdownContent = "";
         let videoTitle = "notes";
 
@@ -63,7 +65,7 @@
                     body: JSON.stringify({ url: url })
                 });
 
-                if (!response.ok) { throw new Error(Server error: ${response.status}); }
+                if (!response.ok) { throw new Error(`Server error: ${response.status}`); }
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -84,7 +86,7 @@
                             const jsonData = JSON.parse(line.substring(6));
                             if (jsonData.title) {
                                 videoTitle = jsonData.title;
-                                statusDiv.textContent = Generating notes for: ${videoTitle};
+                                statusDiv.textContent = `Generating notes for: ${videoTitle}`;
                             }
                             if (jsonData.chunk) {
                                 fullMarkdownContent += jsonData.chunk;
@@ -98,7 +100,7 @@
                     }
                 }
             } catch (error) {
-                statusDiv.textContent = ❌ An error occurred: ${error.message};
+                statusDiv.textContent = `❌ An error occurred: ${error.message}`;
             } finally {
                 toggleButtons(false);
             }
@@ -110,7 +112,6 @@
             const notesContainer = document.createElement('div');
             notesContainer.innerHTML = marked.parse(fullMarkdownContent);
             
-            // For better PDF rendering, we render the HTML off-screen
             notesContainer.style.width = '180mm'; // A4 width minus margins
             notesContainer.style.padding = '10mm';
             document.body.appendChild(notesContainer);
@@ -121,7 +122,7 @@
                 const pdfWidth = doc.internal.pageSize.getWidth();
                 const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
                 doc.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
-                doc.save(${videoTitle}.pdf);
+                doc.save(`${videoTitle}.pdf`);
                 document.body.removeChild(notesContainer);
             });
         }
