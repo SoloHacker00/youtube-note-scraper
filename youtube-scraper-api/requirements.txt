@@ -2,4 +2,5 @@ requests
 yt-dlp
 webvtt-py
 fastapi
+markdown2pdf
 uvicorn
