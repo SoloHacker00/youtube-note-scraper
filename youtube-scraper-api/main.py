@@ -174,4 +174,3 @@ async def generate_pdf_endpoint(request: Request):
     except Exception as e:
         logging.error(f"PDF Conversion failed: {e}")
         return {"error": f"Failed to convert notes to PDF. Error: {e}"}, 500
-
