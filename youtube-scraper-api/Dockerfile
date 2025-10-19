@@ -8,8 +8,7 @@ WORKDIR /app
 # Install system dependencies required by the weasyprint PDF library
 RUN apt-get update && apt-get install -y \
     libpango-1.0-0 \
-    libpangoft2-1.0-0 \
-    libharfbuzz0b
+    libpangoft2-1.0-0
 
 # First, upgrade pip itself to the latest version
 RUN pip install --upgrade pip
@@ -23,3 +22,4 @@ COPY main.py .
 
 # Command to run your script as a web server when the container starts
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
