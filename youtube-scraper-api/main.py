@@ -2,14 +2,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import yt_dlp
 import webvtt
-from io import StringIO
+from io import StringIO, BytesIO
 import os
 import re
 import requests
 import json
 import logging
 import time
-import asyncio
+import markdown
+from weasyprint import HTML
 
 # --- CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
@@ -53,8 +54,7 @@ def call_llm(prompt: str):
         logging.error(f"Error calling LLM: {e}")
         return f"\n\n---\nError processing chunk: {e}\n---\n"
 
-async def scrape_and_stream_notes(video_url: str):
-    """A generator function that scrapes, processes, and yields notes chunk by chunk."""
+def scrape_and_generate_notes(video_url: str):
     temp_filename = "temp_video"
     temp_vtt = f"{temp_filename}.en.vtt"
     try:
@@ -64,38 +64,48 @@ async def scrape_and_stream_notes(video_url: str):
             info = ydl.extract_info(video_url, download=True)
             video_title = info.get("title", "Untitled Video")
 
-        yield f"data: {json.dumps({'title': video_title})}\n\n"
-        await asyncio.sleep(0.01)
-
         with open(temp_vtt, "r", encoding="utf-8") as f:
             captions = webvtt.read_buffer(StringIO(f.read()))
         transcript = " ".join(dict.fromkeys([c.text.strip().replace("\n", " ") for c in captions]))
-
-        if not transcript:
-            yield f"data: {json.dumps({'chunk': '# No transcript available.'})}\n\n"
-            return
+        if not transcript: return video_title, "# No transcript available."
 
         chunks = chunk_text(transcript)
+        combined_notes = [f"# Detailed Notes for: {video_title}\n\n"]
+        
         for i, chunk in enumerate(chunks, start=1):
             logging.info(f"Processing chunk {i}/{len(chunks)}...")
-            notes_chunk = call_llm(build_prompt(chunk))
-            yield f"data: {json.dumps({'chunk': notes_chunk})}\n\n"
-            await asyncio.sleep(0.01) # Necessary for streaming response to flush
+            notes = call_llm(build_prompt(chunk))
+            combined_notes.append(notes + "\n\n---\n\n")
+            time.sleep(1)
+        return video_title, "".join(combined_notes)
 
     except Exception as e:
-        logging.error(f"Critical error in streaming process: {e}")
-        error_message = f"A critical error occurred: {getattr(e, 'msg', str(e))}"
-        yield f"data: {json.dumps({'error': error_message})}\n\n"
+        logging.error(f"Critical error in scrape_and_generate_notes: {e}")
+        return "Error", f"A critical error occurred: {getattr(e, 'msg', str(e))}"
     finally:
         if os.path.exists(temp_vtt):
             os.remove(temp_vtt)
-        logging.info("Streaming finished.")
 
-# --- NEW STREAMING API ENDPOINT ---
-@app.post("/stream-notes")
-async def stream_notes_endpoint(request: Request):
+# --- API ENDPOINT ---
+@app.post("/generate-notes-pdf")
+async def generate_pdf_endpoint(request: Request):
     data = await request.json()
     video_url = data.get("url")
     if not video_url: return {"error": "No URL provided."}, 400
 
-    return StreamingResponse(scrape_and_stream_notes(video_url), media_type="text/event-stream")
+    title, markdown_notes = scrape_and_generate_notes(video_url)
+    if title == "Error": return {"error": markdown_notes}, 500
+    
+    safe_filename = re.sub(r'[\\/*?:"<>|]', "", title) + ".pdf"
+    
+    # Convert Markdown to HTML, then HTML to PDF in memory
+    html_text = markdown.markdown(markdown_notes)
+    pdf_buffer = BytesIO()
+    HTML(string=html_text).write_pdf(pdf_buffer)
+    pdf_buffer.seek(0)
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename="{safe_filename}"'}
+    )
