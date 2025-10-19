@@ -2,15 +2,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 import yt_dlp
 import webvtt
-from io import StringIO, BytesIO
+from io import StringIO
 import os
 import re
 import requests
 import json
 import logging
 import time
-import markdown
-from weasyprint import HTML
+import asyncio
 
 # --- CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +33,7 @@ def build_prompt(chunk: str) -> str:
     return f"""
     You are a professional note-taking assistant. Your task is to analyze the following excerpt from a video transcript and generate detailed, well-structured notes in Markdown format.
     *Instructions:*
-    1.  *Extract Key Information:* Focus strictly on key concepts, technical details, and actionable insights.
+    1.  *Extract Key Information:* Focus on key concepts, technical details, and actionable insights.
     2.  *Ignore Noise:* Skip repetitions, fillers, and transcription errors.
     3.  *Structure:* Use Markdown headings (##), bullet points (), and bold text (*).
     4.  *NO META-COMMENTARY:* Your final output must ONLY be the markdown notes.
@@ -45,75 +44,58 @@ def call_llm(prompt: str):
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {GROQ_API_KEY}"}
     data = {"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}]}
     
-    for attempt in range(3):
-        try:
-            response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data, timeout=120)
-            response.raise_for_status()
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                logging.warning(f"Rate limit hit. Waiting 15s before retry {attempt + 2}/3...")
-                time.sleep(15)
-                continue
-            else:
-                logging.error(f"HTTP Error: {e.response.text}")
-                return f"\n\n---\nError with Groq API: {e.response.text}\n---\n"
-        except Exception as e:
-            logging.error(f"Unexpected error in call_llm: {e}")
-            return f"\n\n---\nError parsing Groq response: {e}\n---\n"
-    return "\n\n---\nCRITICAL ERROR: Failed to get a response from Groq after multiple retries.\n---\n"
+    try:
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data, timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logging.error(f"Error calling LLM: {e}")
+        return f"\n\n---\nError processing chunk: {e}\n---\n"
 
-def scrape_and_generate_notes(video_url: str):
+async def scrape_and_stream_notes(video_url: str):
+    """A generator function that scrapes, processes, and yields notes chunk by chunk."""
     temp_filename = "temp_video"
     temp_vtt = f"{temp_filename}.en.vtt"
     try:
         ydl_opts = {"writesubtitles": True, "writeautomaticsub": True, "subtitleslangs": ["en"], "subtitlesformat": "vtt", "skip_download": True, "quiet": True, "outtmpl": temp_filename}
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
             video_title = info.get("title", "Untitled Video")
 
+        yield f"data: {json.dumps({'title': video_title})}\n\n"
+        await asyncio.sleep(0.01)
+
         with open(temp_vtt, "r", encoding="utf-8") as f:
             captions = webvtt.read_buffer(StringIO(f.read()))
         transcript = " ".join(dict.fromkeys([c.text.strip().replace("\n", " ") for c in captions]))
-        if not transcript: return video_title, "# No transcript available."
+
+        if not transcript:
+            yield f"data: {json.dumps({'chunk': '# No transcript available.'})}\n\n"
+            return
 
         chunks = chunk_text(transcript)
-        combined_notes = [f"# Detailed Notes for: {video_title}\n\n"]
         for i, chunk in enumerate(chunks, start=1):
             logging.info(f"Processing chunk {i}/{len(chunks)}...")
-            notes = call_llm(build_prompt(chunk))
-            combined_notes.append(notes + "\n\n---\n\n")
-            time.sleep(1)
-        return video_title, "".join(combined_notes)
+            notes_chunk = call_llm(build_prompt(chunk))
+            yield f"data: {json.dumps({'chunk': notes_chunk})}\n\n"
+            await asyncio.sleep(0.01) # Necessary for streaming response to flush
 
     except Exception as e:
-        logging.error(f"Critical error in scrape_and_generate_notes: {e}")
-        return "Error", f"A critical error occurred: {getattr(e, 'msg', str(e))}"
+        logging.error(f"Critical error in streaming process: {e}")
+        error_message = f"A critical error occurred: {getattr(e, 'msg', str(e))}"
+        yield f"data: {json.dumps({'error': error_message})}\n\n"
     finally:
         if os.path.exists(temp_vtt):
             os.remove(temp_vtt)
+        logging.info("Streaming finished.")
 
-# --- API ENDPOINT ---
-@app.post("/generate-notes-pdf")
-async def generate_pdf_endpoint(request: Request):
+# --- NEW STREAMING API ENDPOINT ---
+@app.post("/stream-notes")
+async def stream_notes_endpoint(request: Request):
     data = await request.json()
     video_url = data.get("url")
     if not video_url: return {"error": "No URL provided."}, 400
 
-    title, markdown_notes = scrape_and_generate_notes(video_url)
-    if title == "Error": return {"error": markdown_notes}, 500
-    
-    safe_filename = re.sub(r'[\\/*?:"<>|]', "", title) + ".pdf"
-    
-    # Convert Markdown to HTML, then HTML to PDF in memory
-    html_text = markdown.markdown(markdown_notes)
-    pdf_buffer = BytesIO()
-    HTML(string=html_text).write_pdf(pdf_buffer)
-    pdf_buffer.seek(0)
-
-    return StreamingResponse(
-        pdf_buffer,
-        media_type='application/pdf',
-        headers={'Content-Disposition': f'attachment; filename="{safe_filename}"'}
-    )
+    return StreamingResponse(scrape_and_stream_notes(video_url), media_type="text/event-stream")
