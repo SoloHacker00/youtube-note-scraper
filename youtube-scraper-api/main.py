@@ -1,25 +1,30 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 import yt_dlp
 import webvtt
-from io import StringIO
+from io import StringIO, BytesIO
 import os
 import re
 import requests
 import json
 import logging
 import time
+from markdown2pdf import convert_md_to_pdf
 
-# --- Configuration ---
+# --- CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 
-# --- Helper Functions ---
+# Default API keys from Render Environment Variables
+DEFAULT_GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+DEFAULT_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+DEFAULT_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+
+# --- HELPER FUNCTIONS ---
 def chunk_text(text, word_limit=600):
-    """Splits text into chunks of a specified word limit."""
-    chunks = []
+    """Splits text into chunks by word count."""
     words = text.split()
-    current_chunk = []
+    chunks, current_chunk = [], []
     for word in words:
         current_chunk.append(word)
         if len(current_chunk) >= word_limit:
@@ -29,110 +34,155 @@ def chunk_text(text, word_limit=600):
         chunks.append(" ".join(current_chunk))
     return chunks
 
-def get_notes_for_chunk(chunk):
-    """Sends a chunk to the Groq API with an advanced prompt and robust error handling."""
-    
-    prompt = f"""
+def build_prompt(chunk: str) -> str:
+    """Creates the detailed markdown note-taking prompt."""
+    return f"""
     You are a professional note-taking assistant. Your task is to analyze the following excerpt from a video transcript and generate detailed, well-structured notes in Markdown format.
     **Instructions:**
-    1.  **Extract Key Information:** Focus strictly on extracting key concepts, technical details, step-by-step instructions, and actionable advice.
-    2.  **Ignore Noise:** The transcript may contain repetition, transcription errors, and nonsensical phrases. Ignore these and focus only on the coherent, meaningful content.
-    3.  **Structure the Output:** Organize the notes into logical sections using Markdown headings (##), bullet points (*), and bold text (**).
-    4.  **DO NOT HALLUCINATE:** Do not invent context or add information that is not present in the excerpt.
-    5.  **NO META-COMMENTARY:** Your final output must ONLY be the markdown notes. Do NOT include your thought process or any XML-style tags like `<think>`.
-    **Transcript Excerpt:**
-    ---
-    {chunk}
-    ---
-    **Detailed Markdown Notes:**
+    1.  **Extract Key Information:** Focus on key concepts, technical details, and actionable insights.
+    2.  **Ignore Noise:** Skip repetitions, fillers, and transcription errors.
+    3.  **Structure:** Use Markdown headings (##), bullet points (*), and bold text (**).
+    4.  **NO META-COMMENTARY:** Your final output must ONLY be the markdown notes. Do not include your thought process or any XML-style tags like `<think>`.
+    **Transcript Excerpt:** --- {chunk} --- **Detailed Markdown Notes:**
     """
+
+def call_llm(platform: str, api_key: str, model: str, prompt: str):
+    """Sends the prompt to the selected LLM platform with error handling."""
+    headers = {"Content-Type": "application/json"}
+    data = {}
+    url = ""
+    effective_key = api_key
+
+    # --- Platform-specific configurations ---
+    if platform == "groq":
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        effective_key = api_key or DEFAULT_GROQ_API_KEY
+        headers["Authorization"] = f"Bearer {effective_key}"
+        data = {"model": model or "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}]}
     
-    # List of models to try in order of preference
-    models_to_try = ["qwen/qwen3-32b","llama3-70b-8192", "mixtral-8x7b-32768", "gemma-7b-it"]
+    elif platform == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+        effective_key = api_key or DEFAULT_OPENAI_API_KEY
+        headers["Authorization"] = f"Bearer {effective_key}"
+        data = {"model": model or "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}]}
 
-    for model in models_to_try:
-        for attempt in range(3): # Try each model up to 3 times
-            try:
-                logging.info(f"Attempting to generate notes with model: {model}")
-                response = requests.post(
-                    url="https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}]
-                    }
-                )
-                
-                # Check for model decommissioned error specifically
-                if response.status_code == 400 and 'model_decommissioned' in response.text:
-                    logging.warning(f"Model {model} is decommissioned. Trying next model.")
-                    break # Break the retry loop for this model and go to the next one
+    elif platform == "google_gemini":
+        effective_key = api_key or DEFAULT_GOOGLE_API_KEY
+        model_name = model or "gemini-1.5-flash-latest"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={effective_key}"
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    else:
+        return f"\n\n---\nError: Unsupported platform '{platform}'.\n---\n"
 
-                response.raise_for_status() # Raise an exception for other bad status codes
-                
-                result = response.json()
-                return result['choices'][0]['message']['content']
-            
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 401:
-                    return "\n\n---\nCRITICAL ERROR: 401 Unauthorized. Your Groq API key is invalid. Check your docker-compose.yml file.\n---\n"
-                elif e.response.status_code == 429:
-                    wait_time = 15#0 * (attempt + 1) # Exponential backoff
-                    logging.warning(f"Rate limit hit. Waiting {wait_time} seconds before retry {attempt + 2}/3...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logging.error(f"HTTP Error for model {model}: {e.response.text}")
-                    break # Stop trying this model if it gives a persistent error other than rate limiting
-            except (KeyError, IndexError, Exception) as e:
-                logging.error(f"Error parsing response or other issue for model {model}: {e}")
-                break # Stop trying this model
+    if not effective_key:
+        return f"\n\n---\nError: API key for {platform} is missing. The user did not provide one, and no default key is set on the server.\n---\n"
 
-    return "\n\n---\nCRITICAL ERROR: All tested models failed. Please check your API key, network connection, and the Groq model list.\n---\n"
+    # --- API Request with Retry Logic ---
+    for attempt in range(3):
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=120)
+            response.raise_for_status()
+            result = response.json()
 
-def scrape_and_process_video(video_url):
-    # This function remains largely the same
-    temp_filename_base = "temp_notes"
-    temp_vtt_filename_full = f"{temp_filename_base}.en.vtt"
+            if platform in ["groq", "openai"]:
+                return result["choices"][0]["message"]["content"]
+            elif platform == "google_gemini":
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                wait_time = 15
+                logging.warning(f"Rate limit hit. Waiting {wait_time}s before retry {attempt + 2}/3...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logging.error(f"HTTP Error for {platform}: {e.response.text}")
+                return f"\n\n---\nError with {platform} API: {e.response.text}\n---\n"
+        except Exception as e:
+            logging.error(f"Unexpected error for {platform}: {e}")
+            return f"\n\n---\nError parsing {platform} response: {e}\n---\n"
+    
+    return f"\n\n---\nCRITICAL ERROR: Failed to get a response from {platform} after multiple retries.\n---\n"
+
+
+def scrape_and_generate_notes(video_url: str, custom_api: dict):
+    """Orchestrates the entire process from scrape to note generation."""
+    temp_filename = "temp_video"
+    temp_vtt = f"{temp_filename}.en.vtt"
+    
     try:
         ydl_opts = {
-            'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['en'],
-            'subtitlesformat': 'vtt', 'skip_download': True, 'quiet': True,
-            'outtmpl': temp_filename_base
+            "writesubtitles": True, "writeautomaticsub": True, "subtitleslangs": ["en"],
+            "subtitlesformat": "vtt", "skip_download": True, "quiet": True, "outtmpl": temp_filename,
         }
-        if os.path.exists('/app/cookies.txt'):
-            ydl_opts['cookiefile'] = '/app/cookies.txt'
+        if os.path.exists("/app/cookies.txt"):
+            ydl_opts["cookiefile"] = "/app/cookies.txt"
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-            video_title = info.get('title', 'Untitled Video')
-        with open(temp_vtt_filename_full, 'r', encoding='utf-8') as f:
-            vtt_content = f.read()
-        captions = webvtt.read_buffer(StringIO(vtt_content))
-        full_transcript = " ".join(dict.fromkeys([c.text.strip().replace('\n', ' ') for c in captions]))
-        if not full_transcript:
-            return video_title, "# No transcript available."
-        text_chunks = chunk_text(full_transcript)
+            video_title = info.get("title", "Untitled Video")
+
+        with open(temp_vtt, "r", encoding="utf-8") as f:
+            captions = webvtt.read_buffer(StringIO(f.read()))
+        transcript = " ".join(dict.fromkeys([c.text.strip().replace("\n", " ") for c in captions]))
+
+        if not transcript:
+            return video_title, "# No transcript available for this video."
+
+        chunks = chunk_text(transcript)
         combined_notes = [f"# Detailed Notes for: {video_title}\n\n"]
-        for chunk in text_chunks:
-            chunk_notes = get_notes_for_chunk(chunk)
-            combined_notes.append(chunk_notes)
-            combined_notes.append("\n\n---\n\n")
-            time.sleep(1) # Keep a small base delay between successful calls
+
+        platform = custom_api.get("platform", "groq")
+        api_key = custom_api.get("key")
+        model = custom_api.get("model")
+
+        for i, chunk in enumerate(chunks, start=1):
+            logging.info(f"Processing chunk {i}/{len(chunks)} via {platform}...")
+            prompt = build_prompt(chunk)
+            notes = call_llm(platform, api_key, model, prompt)
+            combined_notes.append(notes + "\n\n---\n\n")
+            time.sleep(1)
+
         return video_title, "".join(combined_notes)
+
     except Exception as e:
+        logging.error(f"Critical error in scrape_and_generate_notes: {e}")
         return "Error", f"A critical error occurred: {getattr(e, 'msg', str(e))}"
     finally:
-        if os.path.exists(temp_vtt_filename_full):
-            os.remove(temp_vtt_filename_full)
+        if os.path.exists(temp_vtt):
+            os.remove(temp_vtt)
 
-@app.post("/generate-notes")
-async def generate_notes_endpoint(request: dict):
-    # This function is unchanged
-    video_url = request.get("url")
-    if not video_url:
-        return {"error": "URL not provided"}
-    title, notes = scrape_and_process_video(video_url)
+# --- API ENDPOINTS ---
+@app.post("/generate-notes-md")
+async def generate_md_endpoint(request: Request):
+    """Endpoint for generating raw markdown (for playlist monitor)."""
+    data = await request.json()
+    video_url = data.get("url")
+    custom_api = data.get("custom_api", {})
+    if not video_url: return {"error": "No URL provided."}
+    title, notes = scrape_and_generate_notes(video_url, custom_api)
     return {"title": title, "notes": notes}
+
+@app.post("/generate-notes-pdf")
+async def generate_pdf_endpoint(request: Request):
+    """Endpoint for generating a downloadable PDF (for web UI)."""
+    data = await request.json()
+    video_url = data.get("url")
+    custom_api = data.get("custom_api", {})
+    if not video_url: return {"error": "No URL provided."}, 400
+
+    title, markdown_notes = scrape_and_generate_notes(video_url, custom_api)
+
+    if title == "Error": return {"error": markdown_notes}, 500
+    
+    safe_filename = re.sub(r'[\\/*?:"<>|]', "", title) + ".pdf"
+    pdf_buffer = BytesIO()
+    convert_md_to_pdf(markdown_notes, pdf_buffer)
+    pdf_buffer.seek(0)
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename="{safe_filename}"'}
+    )
